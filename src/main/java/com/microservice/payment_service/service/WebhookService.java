@@ -3,6 +3,7 @@ package com.microservice.payment_service.service;
 
 import com.microservice.payment_service.dto.PaymentResponseDto;
 import com.microservice.payment_service.dto.callback.RazorpayWebhookDto;
+import com.microservice.payment_service.entity.PaymentStatus;
 import com.microservice.payment_service.entity.PaymentTransaction;
 import com.microservice.payment_service.repository.PaymentTransactionRepository;
 import com.microservice.payment_service.utility.RazorpayWebhookParser;
@@ -56,7 +57,11 @@ public class WebhookService {
     private void  handlePaymentAuthorized(RazorpayWebhookDto dto) {
 
         String paymentId = parser.getPaymentId(dto);
+        System.out.println("reached handlePaymentAuthorized");
+        System.out.println("This is the paymentId" + paymentId);
+
         String orderId   = parser.getOrderId(dto);
+        System.out.println("this is orderId"+orderId);
         Long amount      = parser.getAmount(dto);
 
         log.info("[Webhook] Payment authorized. paymentId={} orderId={} amount={}",
@@ -65,9 +70,11 @@ public class WebhookService {
         // 1. Lookup PaymentTransaction using orderId
         PaymentTransaction tx = txRepo.findByExternalId(orderId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
-
+        tx.setPaymentId(paymentId);
+        tx.setStatus(PaymentStatus.AUTHORIZED);
+        txRepo.save(tx);
         // 2. Trigger manual capture
-        PaymentResponseDto paymentResponseDto = paymentService.capturePayment(paymentId);
+        PaymentResponseDto paymentResponseDto = paymentService.capturePayment(orderId);
         log.info("[Webhook] Capture API triggered for paymentId={}", paymentId);
 
     }

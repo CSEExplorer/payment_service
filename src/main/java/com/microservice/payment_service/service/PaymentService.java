@@ -30,17 +30,17 @@ public class PaymentService {
     @Transactional
     public PaymentResponseDto createPayment(PaymentRequestDto request) {
         log.info("Initiating payment for user={} amount={}", request.getUserId(), request.getAmount());
-
+        String idempotencyKey = request.getReferenceId() + ":create";
         // --- Step 1: Idempotency check ---
         Optional<PaymentOperation> existingOp = paymentOperationRepository
                 .findByIdempotencyKeyAndUserIdAndOperationType(
-                        request.getIdempotencyKey(),
+                        idempotencyKey,
                         request.getUserId(),
                         OperationType.CREATE_PAYMENT
                 );
 
         if (existingOp.isPresent() && existingOp.get().getStatus() == OperationStatus.SUCCESS) {
-            log.info("Duplicate payment request detected for idempotencyKey={}, returning existing result", request.getIdempotencyKey());
+            log.info("Duplicate payment request detected for idempotencyKey={}, returning existing result", idempotencyKey);
             PaymentTransaction tx = existingOp.get().getPaymentTransaction();
             return PaymentResponseDto.builder()
                     .transactionId(tx.getId())
@@ -53,7 +53,7 @@ public class PaymentService {
 
         // --- Step 2: Create operation record ---
         PaymentOperation operation = PaymentOperation.builder()
-                .idempotencyKey(request.getIdempotencyKey())
+                .idempotencyKey(idempotencyKey)
                 .userId(request.getUserId())
                 .operationType(OperationType.CREATE_PAYMENT)
                 .status(OperationStatus.IN_PROGRESS)
@@ -73,9 +73,13 @@ public class PaymentService {
             paymentTransactionRepository.save(tx);
             operation.setPaymentTransaction(tx);
 
+            // first state created comes and then Authorized comes
             // --- Step 4: Delegate to gateway ---
             GatewayAdapter adapter = gatewayAdapterService.getAdapter(request.getGateway());
             PaymentGatewayResponse gatewayResponse = adapter.createPayment(request, tx);
+            System.out.println("the body is "+gatewayResponse.getBody());
+            System.out.println("the mesaage is "+gatewayResponse.getMessage());
+            System.out.println("the Id is "+gatewayResponse.getId());
 
             // --- Step 5: Persist response ---
             operation.setGatewayResponse(gatewayResponse);

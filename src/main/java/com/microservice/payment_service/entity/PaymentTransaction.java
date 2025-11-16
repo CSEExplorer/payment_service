@@ -38,6 +38,9 @@ public class PaymentTransaction {
     @Column(name = "user_id", nullable = false)
     private String userId;
 
+    @Column(name = "payment_id", nullable = true)
+    private String paymentId;
+
     /**
      * Business reference or order id in your system.
      */

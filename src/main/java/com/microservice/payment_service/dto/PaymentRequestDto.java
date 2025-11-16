@@ -32,19 +32,12 @@ public class PaymentRequestDto {
      */
     private Gateway gateway;
 
-    /**
-     * Optional unique key to ensure idempotency.
-     */
-    private String idempotencyKey;
 
     /**
      * Optional business reference (e.g. orderId, invoiceId).
      */
     private String referenceId;
 
-    /**
-     * Optional plan ID if this payment is for a subscription or plan.
-     */
-    private Long planId;
+
 }
 

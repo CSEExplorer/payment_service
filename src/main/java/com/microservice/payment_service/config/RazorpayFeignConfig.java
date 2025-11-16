@@ -9,10 +9,10 @@ import java.util.Base64;
 
 public class RazorpayFeignConfig {
 
-    @Value("${gateway.razorpay.key-id}")
+    @Value("${gateway.razorpay.key_id}")
     private String keyId;
 
-    @Value("${gateway.razorpay.key-secret}")
+    @Value("${gateway.razorpay.secret}")
     private String keySecret;
 
     @Bean

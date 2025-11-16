@@ -37,18 +37,19 @@ public class RazorpayAdapter implements GatewayAdapter {
         body.put("amount", razorpayAmount);
         body.put("currency", request.getCurrency());
         body.put("receipt", "receipt_" + tx.getId());
-        body.put("payment_capture", 0); // auto-capture disabled , caputre call i make by myself
+        body.put("payment_capture", 0); // auto-capture disabled , capture  call I make by myself
 
         try {
             // REAL API CALL
             Map<String, Object> response = razorpayFeignClient.createOrder(body);
-
+            ObjectMapper mapper = new ObjectMapper();
+            String json = mapper.writeValueAsString(response);
 
 
             return PaymentGatewayResponse.builder()
                     .gateway(Gateway.RAZORPAY)
                     .statusCode(200)
-                    .body(response.toString())
+                    .body(json)
                     .message("Order created successfully")
                     .createdAt(Instant.now())
                     .build();
@@ -69,16 +70,49 @@ public class RazorpayAdapter implements GatewayAdapter {
 
     @Override
     public PaymentGatewayResponse capturePayment(PaymentTransaction tx) {
-        log.info("[Razorpay] Capturing payment for externalId={}", tx.getExternalId());
+        try {
+            log.info("[Razorpay] Capturing payment for paymentId={} amount={}",
+                    tx.getPaymentId(), tx.getAmount());
 
-        return PaymentGatewayResponse.builder()
-                .gateway(Gateway.RAZORPAY)
-                .statusCode(200)
-                .body("{\"id\":\"" + tx.getExternalId() + "\",\"status\":\"captured\"}")
-                .message("Payment captured successfully")
-                .createdAt(Instant.now())
-                .build();
+            if (tx.getPaymentId() == null) {
+                throw new IllegalArgumentException("PaymentTransaction does not contain paymentId");
+            }
+
+            // Razorpay requires amount in paise
+            long amountInPaise = tx.getAmount()
+                    .multiply(BigDecimal.valueOf(100))
+                    .longValue();
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("amount", amountInPaise);
+            body.put("currency", tx.getCurrency());
+            Map<String, Object> razorpayResponse =
+                    razorpayFeignClient.capturePayment(tx.getPaymentId(), body);
+
+            ObjectMapper objectMapper = new ObjectMapper();
+            String json = objectMapper.writeValueAsString(razorpayResponse);
+
+            return PaymentGatewayResponse.builder()
+                    .gateway(Gateway.RAZORPAY)
+                    .statusCode(200)
+                    .body(json)
+                    .message("Payment captured successfully")
+                    .createdAt(Instant.now())
+                    .build();
+
+        } catch (Exception e) {
+            log.error("[Razorpay] Capture failed for paymentId={}", tx.getPaymentId(), e);
+
+            return PaymentGatewayResponse.builder()
+                    .gateway(Gateway.RAZORPAY)
+                    .statusCode(500)
+                    .body("{\"error\":\"capture_failed\"}")
+                    .message(e.getMessage())
+                    .createdAt(Instant.now())
+                    .build();
+        }
     }
+
 
     @Override
     public PaymentGatewayResponse initiateRefund(PaymentTransaction tx, Refund refund) {

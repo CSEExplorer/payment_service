@@ -3,6 +3,7 @@ package com.microservice.payment_service.adapter.feign;
 
 import com.microservice.payment_service.config.RazorpayFeignConfig;
 import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import java.util.Map;
@@ -18,7 +19,7 @@ public interface RazorpayFeignClient {
     Map<String, Object> createOrder(@RequestBody Map<String, Object> body);
 
     @PostMapping("/v1/payments/{paymentId}/capture")
-    Map<String, Object> capturePayment(@RequestBody Map<String, Object> body);
+    Map<String, Object> capturePayment(@PathVariable("paymentId") String paymentId, @RequestBody Map<String, Object> body);
 
     @PostMapping("/v1/payments/{paymentId}/refund")
     Map<String, Object> initiateRefund(@RequestBody Map<String, Object> body);

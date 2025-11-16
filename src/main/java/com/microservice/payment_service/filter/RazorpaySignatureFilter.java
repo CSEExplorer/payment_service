@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.stream.Collectors;
 
 @Component
@@ -34,14 +35,14 @@ public class RazorpaySignatureFilter extends OncePerRequestFilter {
 
             String signature = request.getHeader("X-Razorpay-Signature");
 
-            // Read request body
-            String body = request.getReader().lines().collect(Collectors.joining(System.lineSeparator()));
+            String body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
 
             if (!signatureValidator.isValid(body, signature)) {
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-                response.getWriter().write("Invalid webhook signature");
-                return; // Stop filter chain
-            }
+                    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                    response.getWriter().write("Invalid webhook signature");
+                    return; // Stop filter chain
+                }
 
             // Wrap body again for controller usage
             HttpServletRequest wrapped = new CachedBodyHttpServletRequest(request, body);
