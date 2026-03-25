@@ -8,13 +8,14 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 @Repository
 public interface PaymentTransactionRepository extends JpaRepository<PaymentTransaction, Long> {
 
     Optional<PaymentTransaction> findByExternalId(String externalId);
 
-    Optional<PaymentTransaction> findByReferenceId(String referenceId);
+    Optional<PaymentTransaction> findByReferenceId(UUID referenceId);
 
     List<PaymentTransaction> findByUserId(String userId);
 

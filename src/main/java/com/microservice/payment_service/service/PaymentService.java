@@ -1,10 +1,16 @@
 package com.microservice.payment_service.service;
 
 
+import com.aditya.contracts.event.DomainEvent;
+import com.aditya.contracts.order.OrderCreatedEvent;
+import com.aditya.contracts.payment.PaymentCompletedEvent;
+import com.aditya.contracts.payment.PaymentFailedEvent;
 import com.microservice.payment_service.adapter.GatewayAdapter;
 import com.microservice.payment_service.dto.PaymentRequestDto;
 import com.microservice.payment_service.dto.PaymentResponseDto;
 import com.microservice.payment_service.entity.*;
+import com.microservice.payment_service.messaging.PaymentEventFactory;
+import com.microservice.payment_service.outbox.service.OutboxService;
 import com.microservice.payment_service.repository.PaymentOperationRepository;
 import com.microservice.payment_service.repository.PaymentTransactionRepository;
 import jakarta.transaction.Transactional;
@@ -14,6 +20,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -23,7 +30,8 @@ public class PaymentService {
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final PaymentOperationRepository paymentOperationRepository;
     private final GatewayAdapterService gatewayAdapterService;
-
+    private final PaymentEventFactory paymentEventFactory;
+    private final OutboxService outboxService;
     /**
      * Create a payment - handles idempotency & delegates to gateway.
      */
@@ -69,6 +77,7 @@ public class PaymentService {
                     .currency(request.getCurrency())
                     .gateway(request.getGateway())
                     .status(PaymentStatus.CREATED)
+                    .referenceId(UUID.fromString(request.getReferenceId()))
                     .build();
             paymentTransactionRepository.save(tx);
             operation.setPaymentTransaction(tx);
@@ -103,7 +112,26 @@ public class PaymentService {
 
 
         } catch (Exception ex) {
+            //  Here i will publish payment Successfully
             log.error("Payment creation failed: {}", ex.getMessage(), ex);
+            PaymentFailedEvent payload = PaymentFailedEvent.builder()
+                    .paymentId(null)
+                    .orderId(null)
+                    .userId(UUID.fromString(request.getUserId()))
+                    .amount(request.getAmount())
+                    .reason(ex.getMessage()).build();
+
+            DomainEvent<?> event =
+                    paymentEventFactory.createPaymentFailedEvent(UUID.fromString(request.getReferenceId()),payload);
+
+
+            outboxService.saveEvent(
+                    UUID.fromString(request.getReferenceId()),
+                    "PAYMENT",
+                    "payment.failed",
+                    event
+            );
+
             operation.setStatus(OperationStatus.FAILED);
             paymentOperationRepository.save(operation);
             throw new RuntimeException("Payment creation failed: " + ex.getMessage(), ex);
@@ -187,6 +215,24 @@ public class PaymentService {
             tx.setCapturedAt(Instant.now());
             paymentTransactionRepository.save(tx);
 
+            PaymentCompletedEvent payload = PaymentCompletedEvent.builder()
+                    .paymentId(null)
+                    .orderId(tx.getReferenceId())
+                    .userId(UUID.fromString(tx.getUserId()))
+                    .amount(tx.getAmount())
+                    .build();
+            DomainEvent<?> event =
+                    paymentEventFactory.createPaymentCompletedEvent(tx.getReferenceId(),payload);
+
+
+            outboxService.saveEvent(
+                    tx.getReferenceId(),
+                    "PAYMENT",
+                    "payment.completed",
+                    event
+            );
+            System.out.println("Payment Captured Published to the rabbitMQ");
+
             // 8. Build and return response
             return PaymentResponseDto.builder()
                     .transactionId(tx.getId())
@@ -198,11 +244,28 @@ public class PaymentService {
                     .build();
 
         } catch (Exception ex) {
+            PaymentFailedEvent payload = PaymentFailedEvent.builder()
+                    .paymentId(null)
+                    .orderId(null)
+                    .userId(UUID.fromString(tx.getUserId()))
+                    .amount(tx.getAmount())
+                    .reason(ex.getMessage()).build();
+            DomainEvent<?> event =
+                    paymentEventFactory.createPaymentFailedEvent(tx.getReferenceId(),payload);
 
+
+            outboxService.saveEvent(
+                    tx.getReferenceId(),
+                    "PAYMENT",
+                    "payment.failed",
+                    event
+            );
             // 9. Mark operation FAILED
             op.setStatus(OperationStatus.FAILED);
             op.setRequestPayload("ERROR: " + ex.getMessage());
             paymentOperationRepository.save(op);
+
+
 
             throw new RuntimeException("Failed to capture payment: " + ex.getMessage(), ex);
         }

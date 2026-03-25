@@ -3,10 +3,11 @@ package com.microservice.payment_service.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.payment_service.dto.callback.RazorpayWebhookDto;
 
+import com.microservice.payment_service.service.WebhookService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
-import org.springframework.kafka.core.KafkaTemplate;
+
 import org.springframework.web.bind.annotation.*;
 
 
@@ -16,9 +17,8 @@ import org.springframework.web.bind.annotation.*;
 @Slf4j
 public class WebhookController {
 
-    private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
-
+    private final WebhookService webhookService;
     @PostMapping("/{gateway}")
     public ResponseEntity<String> handleWebhook(
             @PathVariable String gateway,
@@ -30,11 +30,8 @@ public class WebhookController {
                 gateway, callback.getEvent());
 
         try {
-            // 1. Convert to JSON string (store raw payload)
-            String payloadJson = objectMapper.writeValueAsString(callback);
 
-            // 2. Push to Kafka topic for async processing
-            kafkaTemplate.send("payment_webhook_events", payloadJson);
+            webhookService.handleGatewayWebhook("razorpay", callback);
 
             log.info("[Webhook] Published event to Kafka topic=payment_webhook_events");
 

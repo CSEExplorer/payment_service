@@ -71,6 +71,7 @@ public class WebhookService {
         PaymentTransaction tx = txRepo.findByExternalId(orderId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
         tx.setPaymentId(paymentId);
+        tx.setExternalId(orderId);
         tx.setStatus(PaymentStatus.AUTHORIZED);
         txRepo.save(tx);
         // 2. Trigger manual capture

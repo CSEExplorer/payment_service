@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Entity
 @Table(name = "payment_transactions",
@@ -44,8 +45,9 @@ public class PaymentTransaction {
     /**
      * Business reference or order id in your system.
      */
+    // ye order id ka corresponding system UUID hai
     @Column(name = "reference_id")
-    private String referenceId;
+    private UUID referenceId;
 
     @Column(name = "amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal amount;
