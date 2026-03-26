@@ -2,16 +2,14 @@ package com.microservice.payment_service.service;
 
 
 import com.aditya.contracts.event.DomainEvent;
-import com.aditya.contracts.order.OrderCreatedEvent;
-import com.aditya.contracts.payment.PaymentCompletedEvent;
-import com.aditya.contracts.payment.PaymentFailedEvent;
 import com.microservice.payment_service.adapter.GatewayAdapter;
 import com.microservice.payment_service.dto.PaymentRequestDto;
 import com.microservice.payment_service.dto.PaymentResponseDto;
 import com.microservice.payment_service.entity.*;
 import com.microservice.payment_service.messaging.PaymentEventFactory;
 import com.microservice.payment_service.outbox.service.OutboxService;
-import com.microservice.payment_service.repository.PaymentOperationRepository;
+import com.microservice.payment_service.repository.PaymentGatewayResponseRepository;
+import com.microservice.payment_service.repository.PaymentRepository;
 import com.microservice.payment_service.repository.PaymentTransactionRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -28,248 +26,179 @@ import java.util.UUID;
 public class PaymentService {
 
     private final PaymentTransactionRepository paymentTransactionRepository;
-    private final PaymentOperationRepository paymentOperationRepository;
+
     private final GatewayAdapterService gatewayAdapterService;
     private final PaymentEventFactory paymentEventFactory;
     private final OutboxService outboxService;
+    private final PaymentRepository paymentRepository;
+
     /**
      * Create a payment - handles idempotency & delegates to gateway.
      */
     @Transactional
     public PaymentResponseDto createPayment(PaymentRequestDto request) {
-        log.info("Initiating payment for user={} amount={}", request.getUserId(), request.getAmount());
-        String idempotencyKey = request.getReferenceId() + ":create";
-        // --- Step 1: Idempotency check ---
-        Optional<PaymentOperation> existingOp = paymentOperationRepository
-                .findByIdempotencyKeyAndUserIdAndOperationType(
-                        idempotencyKey,
-                        request.getUserId(),
-                        OperationType.CREATE_PAYMENT
-                );
 
-        if (existingOp.isPresent() && existingOp.get().getStatus() == OperationStatus.SUCCESS) {
-            log.info("Duplicate payment request detected for idempotencyKey={}, returning existing result", idempotencyKey);
-            PaymentTransaction tx = existingOp.get().getPaymentTransaction();
-            return PaymentResponseDto.builder()
-                    .transactionId(tx.getId())
-                    .status(tx.getStatus())
-                    .gateway(tx.getGateway())
-                    .amount(tx.getAmount())
-                    .currency(tx.getCurrency())
-                    .build();
-        }
+        UUID orderId = request.getReferenceId();
+        // for payment => Initiated , then captured and then may be failed
+        // for transaction status => created , Authorized , captured , failed
+        // 🔥 STEP 1: Find or create Payment (AGGREGATE)
+        Payment payment = paymentRepository.findByOrderId(orderId)
+                .orElseGet(() -> {
+                    Payment newPayment = Payment.builder()
+                            .orderId(orderId)
+                            .amount(request.getAmount())
+                            .currency(request.getCurrency())
+                            .gateway(request.getGateway())
+                            .status(PaymentStatus.INITIATED)
+                            .build();
+                    return paymentRepository.save(newPayment);
+                });
+        //Ques   When the new payment is created it paymentId is auto generated UUID if not where I am generating it
+        // Ques  tell me each transction is the attempt ,
+        //Ques   Somewhere i wrtie Initiated and somewhere create please clerfyt the which status comes when
 
-        // --- Step 2: Create operation record ---
-        PaymentOperation operation = PaymentOperation.builder()
-                .idempotencyKey(idempotencyKey)
-                .userId(request.getUserId())
-                .operationType(OperationType.CREATE_PAYMENT)
-                .status(OperationStatus.IN_PROGRESS)
-                .requestPayload(request.toString())
+        // 🔥 STEP 2: Create Transaction (attempt)
+        PaymentTransaction tx = PaymentTransaction.builder()
+                .paymentId(payment.getPaymentId())   // 🔥 KEY FIX
+                .orderId(orderId)
+                .userId(request.getUserId().toString())
+                .amount(request.getAmount())
+                .currency(request.getCurrency())
+                .gateway(request.getGateway())
+                .status(PaymentStatus.CREATED)
+                .attemptNumber(getNextAttemptNumber(payment.getPaymentId()))
                 .build();
-        paymentOperationRepository.save(operation);
+
+        paymentTransactionRepository.save(tx);
 
         try {
-            // --- Step 3: Create transaction record ---
-            PaymentTransaction tx = PaymentTransaction.builder()
-                    .userId(request.getUserId())
-                    .amount(request.getAmount())
-                    .currency(request.getCurrency())
-                    .gateway(request.getGateway())
-                    .status(PaymentStatus.CREATED)
-                    .referenceId(UUID.fromString(request.getReferenceId()))
-                    .build();
-            paymentTransactionRepository.save(tx);
-            operation.setPaymentTransaction(tx);
-
-            // first state created comes and then Authorized comes
-            // --- Step 4: Delegate to gateway ---
+            // 🔥  STEP 3: Gateway call
             GatewayAdapter adapter = gatewayAdapterService.getAdapter(request.getGateway());
-            PaymentGatewayResponse gatewayResponse = adapter.createPayment(request, tx);
-            System.out.println("the body is "+gatewayResponse.getBody());
-            System.out.println("the mesaage is "+gatewayResponse.getMessage());
-            System.out.println("the Id is "+gatewayResponse.getId());
+            PaymentGatewayResponse response = adapter.createPayment(request, tx);
+            System.out.println("the body is "+response.getBody());
+            System.out.println("the mesaage is "+response.getMessage());
+            System.out.println("the Id is "+response.getId());
 
-            // --- Step 5: Persist response ---
-            operation.setGatewayResponse(gatewayResponse);
-            operation.setStatus(OperationStatus.SUCCESS);
-            paymentOperationRepository.save(operation);
+            // 🔥 STEP 4: Save ONLY orderId here
+            String gatewayOrderId = adapter.extractGatewayOrderId(response);
+            payment.setGatewayOrderId(gatewayOrderId);
 
-            tx.setExternalId(adapter.extractTransactionId(gatewayResponse));
-            tx.setStatus(PaymentStatus.AUTHORIZED);
+            // 🔥 Payment still INITIATED (NOT AUTHORIZED yet)
+            payment.setStatus(PaymentStatus.INITIATED);
+            paymentRepository.save(payment);
+
+            tx.setStatus(PaymentStatus.CREATED);
             paymentTransactionRepository.save(tx);
 
-
-            // --- Step 6: Build response ---
-            return PaymentResponseDto.builder()
-                    .transactionId(tx.getId())
-                    .status(tx.getStatus())
-                    .gateway(tx.getGateway())
-                    .amount(tx.getAmount())
-                    .currency(tx.getCurrency())
-                    .externalId(tx.getExternalId())
-                    .build();
-
-
-        } catch (Exception ex) {
-            //  Here i will publish payment Successfully
-            log.error("Payment creation failed: {}", ex.getMessage(), ex);
-            PaymentFailedEvent payload = PaymentFailedEvent.builder()
-                    .paymentId(null)
-                    .orderId(null)
-                    .userId(UUID.fromString(request.getUserId()))
-                    .amount(request.getAmount())
-                    .reason(ex.getMessage()).build();
-
-            DomainEvent<?> event =
-                    paymentEventFactory.createPaymentFailedEvent(UUID.fromString(request.getReferenceId()),payload);
-
+            // 🔥 STEP 6: EVENT (IMPORTANT FIX)
+            DomainEvent<?> event = paymentEventFactory.createPaymentInitiatedEvent(payment);
 
             outboxService.saveEvent(
-                    UUID.fromString(request.getReferenceId()),
+                    payment.getPaymentId(),   // 🔥 aggregateId MUST be paymentId
+                    "PAYMENT",
+                    "payment.initiated",
+                    event
+            );
+
+            return PaymentResponseDto.builder()
+                    .paymentId(tx.getPaymentId())                  // 🔥 IMPORTANT
+                    .transactionId(tx.getTransactionId())          // UUID
+                    .gatewayPaymentId(tx.getGatewayPaymentId())    // null until capture
+                    .gateway(tx.getGateway())
+                    .status(tx.getStatus())
+                    .amount(tx.getAmount())
+                    .currency(tx.getCurrency())
+                    .message(buildMessage(tx))
+                    .build();
+
+        } catch (Exception ex) {
+
+            payment.setStatus(PaymentStatus.FAILED);
+            payment.setFailureReason(ex.getMessage());
+            paymentRepository.save(payment);
+
+            DomainEvent<?> event = paymentEventFactory.createPaymentFailedEvent(payment, ex.getMessage());
+
+            outboxService.saveEvent(
+                    payment.getPaymentId(),
                     "PAYMENT",
                     "payment.failed",
                     event
             );
 
-            operation.setStatus(OperationStatus.FAILED);
-            paymentOperationRepository.save(operation);
-            throw new RuntimeException("Payment creation failed: " + ex.getMessage(), ex);
+            throw new RuntimeException("Payment failed", ex);
         }
     }
 
     /**
      * Capture a previously authorized payment.
      */
-    @Transactional
-    public PaymentResponseDto capturePayment(String externalOrderId) {
+    public void capturePayment(PaymentTransaction tx) {
 
-        // 1. Find the PaymentTransaction
-        PaymentTransaction tx = paymentTransactionRepository.findByExternalId(externalOrderId)
-                .orElseThrow(() -> new IllegalArgumentException("Payment not found: " + externalOrderId));
-
-        // 2. If already captured → return existing response
-        if (tx.getStatus() == PaymentStatus.CAPTURED) {
-            return PaymentResponseDto.builder()
-                    .transactionId(tx.getId())
-                    .status(tx.getStatus())
-                    .gateway(tx.getGateway())
-                    .amount(tx.getAmount())
-                    .currency(tx.getCurrency())
-                    .externalId(tx.getExternalId())
-                    .build();
+        if (tx.getGatewayPaymentId() == null) {
+            throw new IllegalStateException("Missing gatewayPaymentId");
         }
 
-        /*
-         * IDEMPOTENCY KEY:
-         * For capture operations, safest is:
-         *     <order_id> + ":capture"
-         */
-        String idempotencyKey = tx.getExternalId() + ":capture";
+        Payment payment = paymentRepository.findByPaymentId(tx.getPaymentId())
+                .orElseThrow(() -> new RuntimeException("Payment not found"));
 
-        // 3. Look for existing PaymentOperation (idempotency check)
-        Optional<PaymentOperation> existingOp =
-                paymentOperationRepository.findByIdempotencyKeyAndUserIdAndOperationType(
-                        idempotencyKey,
-                        tx.getUserId(),
-                        OperationType.CAPTURE_PAYMENT
-                );
-
-        if (existingOp.isPresent() && existingOp.get().getStatus() == OperationStatus.SUCCESS) {
-            // Capture already done earlier → return without hitting gateway
-            return PaymentResponseDto.builder()
-                    .transactionId(tx.getId())
-                    .status(PaymentStatus.CAPTURED)
-                    .gateway(tx.getGateway())
-                    .amount(tx.getAmount())
-                    .currency(tx.getCurrency())
-                    .externalId(tx.getExternalId())
-                    .build();
+        // Idempotency check
+        if (payment.getStatus() == PaymentStatus.CAPTURED) {
+            return;
         }
-
-        // 4. Create a new PaymentOperation entry
-        PaymentOperation op = PaymentOperation.builder()
-                .idempotencyKey(idempotencyKey)
-                .operationType(OperationType.CAPTURE_PAYMENT)
-                .status(OperationStatus.IN_PROGRESS)
-                .userId(tx.getUserId())
-                .paymentTransaction(tx)
-                .requestPayload("Capture for payment orderId=" + tx.getExternalId())
-                .createdAt(Instant.now())
-                .build();
-
-        paymentOperationRepository.save(op);
 
         try {
-            // 5. Call Gateway
-            GatewayAdapter adapter = gatewayAdapterService.getAdapter(tx.getGateway());
+            GatewayAdapter adapter = gatewayAdapterService.getAdapter(payment.getGateway());
+
             PaymentGatewayResponse resp = adapter.capturePayment(tx);
 
-            // 6. Mark operation SUCCESS
-            op.setStatus(OperationStatus.SUCCESS);
-            op.setRequestPayload(resp.getBody());
-            paymentOperationRepository.save(op);
-
-            // 7. Update main transaction
+            // ✅ UPDATE SAME TRANSACTION
             tx.setStatus(PaymentStatus.CAPTURED);
             tx.setCapturedAt(Instant.now());
             paymentTransactionRepository.save(tx);
 
-            PaymentCompletedEvent payload = PaymentCompletedEvent.builder()
-                    .paymentId(null)
-                    .orderId(tx.getReferenceId())
-                    .userId(UUID.fromString(tx.getUserId()))
-                    .amount(tx.getAmount())
-                    .build();
-            DomainEvent<?> event =
-                    paymentEventFactory.createPaymentCompletedEvent(tx.getReferenceId(),payload);
+            // ✅ UPDATE AGGREGATE
+            payment.setStatus(PaymentStatus.CAPTURED);
+            payment.setCapturedAt(Instant.now());
+            payment.setCapturedAmount(payment.getAmount());
+            paymentRepository.save(payment);
 
+            // ✅ EVENT
+            DomainEvent<?> event =
+                    paymentEventFactory.createPaymentCompletedEvent(payment, tx);
 
             outboxService.saveEvent(
-                    tx.getReferenceId(),
+                    payment.getPaymentId(),
                     "PAYMENT",
                     "payment.completed",
                     event
             );
-            System.out.println("Payment Captured Published to the rabbitMQ");
 
-            // 8. Build and return response
-            return PaymentResponseDto.builder()
-                    .transactionId(tx.getId())
-                    .status(PaymentStatus.CAPTURED)
-                    .gateway(tx.getGateway())
-                    .amount(tx.getAmount())
-                    .currency(tx.getCurrency())
-                    .externalId(tx.getExternalId())
-                    .build();
+
 
         } catch (Exception ex) {
-            PaymentFailedEvent payload = PaymentFailedEvent.builder()
-                    .paymentId(null)
-                    .orderId(null)
-                    .userId(UUID.fromString(tx.getUserId()))
-                    .amount(tx.getAmount())
-                    .reason(ex.getMessage()).build();
-            DomainEvent<?> event =
-                    paymentEventFactory.createPaymentFailedEvent(tx.getReferenceId(),payload);
 
+            tx.setStatus(PaymentStatus.FAILED);
+            paymentTransactionRepository.save(tx);
+
+            payment.setStatus(PaymentStatus.FAILED);
+            payment.setFailureReason(ex.getMessage());
+            paymentRepository.save(payment);
+
+            DomainEvent<?> event =
+                    paymentEventFactory.createPaymentFailedEvent(payment, ex.getMessage());
 
             outboxService.saveEvent(
-                    tx.getReferenceId(),
+                    payment.getPaymentId(),
                     "PAYMENT",
                     "payment.failed",
                     event
             );
-            // 9. Mark operation FAILED
-            op.setStatus(OperationStatus.FAILED);
-            op.setRequestPayload("ERROR: " + ex.getMessage());
-            paymentOperationRepository.save(op);
 
-
-
-            throw new RuntimeException("Failed to capture payment: " + ex.getMessage(), ex);
+            throw new RuntimeException("Capture failed", ex);
         }
     }
+
 
 
     /**
@@ -278,5 +207,59 @@ public class PaymentService {
     public Optional<PaymentTransaction> getPayment(Long id) {
         return paymentTransactionRepository.findById(id);
     }
+    private int getNextAttemptNumber(UUID paymentId) {
+         // make the countByPaymentId in the repository
+        return paymentTransactionRepository.countByPaymentId(paymentId) + 1;
+    }
+
+    private String buildMessage(PaymentTransaction tx) {
+
+        return switch (tx.getStatus()) {
+            case CREATED -> "Payment created. Awaiting authorization.";
+            case AUTHORIZED -> "Payment authorized. Ready for capture.";
+            case CAPTURED -> "Payment successful.";
+            case FAILED -> "Payment failed.";
+            default -> "Payment processing.";
+        };
+    }
+
+    private PaymentResponseDto buildResponseFromPayment(Payment payment) {
+
+        return PaymentResponseDto.builder()
+                .paymentId(payment.getPaymentId())
+                .transactionId(null) // no active transaction
+                .gatewayPaymentId(null)
+                .gateway(payment.getGateway())
+                .status(payment.getStatus())
+                .amount(payment.getAmount())
+                .currency(payment.getCurrency())
+                .message("Payment already completed")
+                .build();
+    }
+
+    public void retryCapture(Payment payment) {
+
+        log.info("[Retry] Triggering capture retry for payment={}", payment.getPaymentId());
+
+        PaymentTransaction newTx = PaymentTransaction.builder()
+                .paymentId(payment.getPaymentId())
+                .orderId(payment.getOrderId())
+                .userId("SYSTEM_RETRY")
+                .amount(payment.getAmount())
+                .currency(payment.getCurrency())
+                .gateway(payment.getGateway())
+                .status(PaymentStatus.CREATED)
+                .attemptNumber(getNextAttemptNumber(payment.getPaymentId()))
+                .build();
+
+        paymentTransactionRepository.save(newTx);
+
+        // 🔥 IMPORTANT: call same capture logic
+        capturePayment(newTx);
+    }
+
+
+
+
 }
 

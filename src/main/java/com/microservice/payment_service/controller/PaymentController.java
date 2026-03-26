@@ -20,26 +20,10 @@ public class PaymentController {
     @PostMapping
     public ResponseEntity<PaymentResponseDto> createPayment(@RequestBody PaymentRequestDto request) {
         PaymentResponseDto response = paymentService.createPayment(request);
+
         return ResponseEntity.ok(response);
     }
 
-    /**
-     * Capture a payment by externalId
-     */
-    @PostMapping("/{externalId}/capture")
-    public ResponseEntity<PaymentResponseDto> capturePayment(@PathVariable String externalId) {
-        PaymentResponseDto response = paymentService.capturePayment(externalId);
-        return ResponseEntity.ok(response);
-    }
 
-    /**
-     * Get payment status by transactionId
-     */
-    @GetMapping("/{transactionId}")
-    public ResponseEntity<?> getPayment(@PathVariable Long transactionId) {
-        return paymentService.getPayment(transactionId)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
-    }
 }
 

@@ -1,6 +1,5 @@
 package com.microservice.payment_service.adapter;
 
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.payment_service.adapter.feign.RazorpayFeignClient;
@@ -9,6 +8,7 @@ import com.microservice.payment_service.entity.Gateway;
 import com.microservice.payment_service.entity.PaymentGatewayResponse;
 import com.microservice.payment_service.entity.PaymentTransaction;
 import com.microservice.payment_service.entity.Refund;
+import com.microservice.payment_service.repository.PaymentGatewayResponseRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -23,62 +23,75 @@ import java.util.UUID;
 @Slf4j
 @RequiredArgsConstructor
 public class RazorpayAdapter implements GatewayAdapter {
+
     private final RazorpayFeignClient razorpayFeignClient;
+    private final PaymentGatewayResponseRepository gatewayResponseRepository;
+    private final ObjectMapper objectMapper;
 
     @Override
     public PaymentGatewayResponse createPayment(PaymentRequestDto request, PaymentTransaction tx) {
-        log.info("[Razorpay] Creating Razorpay Order for user={} amount={}", request.getUserId(), request.getAmount());
 
-        // Razorpay expects amount in paise → multiply by 100
-        long razorpayAmount = request.getAmount().multiply(BigDecimal.valueOf(100)).longValue();
+        log.info("[Razorpay] Creating Order user={} amount={}", request.getUserId(), request.getAmount());
 
-        // Build request body for Razorpay
+        long razorpayAmount = request.getAmount()
+                .multiply(BigDecimal.valueOf(100))
+                .longValue();
+
         Map<String, Object> body = new HashMap<>();
         body.put("amount", razorpayAmount);
         body.put("currency", request.getCurrency());
-        body.put("receipt", "receipt_" + tx.getId());
-        body.put("payment_capture", 0); // auto-capture disabled , capture  call I make by myself
+        body.put("receipt", generateReceipt(tx));
+        body.put("payment_capture", 0);
 
         try {
-            // REAL API CALL
             Map<String, Object> response = razorpayFeignClient.createOrder(body);
-            ObjectMapper mapper = new ObjectMapper();
-            String json = mapper.writeValueAsString(response);
+            String json = objectMapper.writeValueAsString(response);
+
+            // ✅ Save success response
+            PaymentGatewayResponse saved = saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    200,
+                    json,
+                    "Order created successfully"
+            );
+
+            // ✅ Extract important fields
+            JsonNode node = objectMapper.readTree(json);
+            String razorpayOrderId = node.get("id").asText();
 
 
-            return PaymentGatewayResponse.builder()
-                    .gateway(Gateway.RAZORPAY)
-                    .statusCode(200)
-                    .body(json)
-                    .message("Order created successfully")
-                    .createdAt(Instant.now())
-                    .build();
+
+            log.info("[Razorpay] Order created: orderId={} receipt={}",
+                    razorpayOrderId, node.get("receipt").asText());
+
+            return saved;
 
         } catch (Exception ex) {
-            log.error("Error creating Razorpay order: {}", ex.getMessage(), ex);
 
-            return PaymentGatewayResponse.builder()
-                    .gateway(Gateway.RAZORPAY)
-                    .statusCode(500)
-                    .message("Failed to create order at Razorpay")
-                    .createdAt(Instant.now())
-                    .body(ex.getMessage())
-                    .build();
+            log.error("[Razorpay] Order creation FAILED for tx={}", tx.getTransactionId(), ex);
+
+            String errorBody = extractErrorBody(ex);
+
+            return saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    500,
+                    errorBody,
+                    "Order creation failed"
+            );
         }
     }
 
-
     @Override
     public PaymentGatewayResponse capturePayment(PaymentTransaction tx) {
-        try {
-            log.info("[Razorpay] Capturing payment for paymentId={} amount={}",
-                    tx.getPaymentId(), tx.getAmount());
 
-            if (tx.getPaymentId() == null) {
-                throw new IllegalArgumentException("PaymentTransaction does not contain paymentId");
+        log.info("[Razorpay] Capturing payment paymentId={} amount={}",
+                tx.getGatewayPaymentId(), tx.getAmount());
+
+        try {
+            if (tx.getGatewayPaymentId() == null) {
+                throw new IllegalArgumentException("Missing Razorpay paymentId");
             }
 
-            // Razorpay requires amount in paise
             long amountInPaise = tx.getAmount()
                     .multiply(BigDecimal.valueOf(100))
                     .longValue();
@@ -86,57 +99,120 @@ public class RazorpayAdapter implements GatewayAdapter {
             Map<String, Object> body = new HashMap<>();
             body.put("amount", amountInPaise);
             body.put("currency", tx.getCurrency());
-            Map<String, Object> razorpayResponse =
-                    razorpayFeignClient.capturePayment(tx.getPaymentId(), body);
 
-            ObjectMapper objectMapper = new ObjectMapper();
-            String json = objectMapper.writeValueAsString(razorpayResponse);
+            Map<String, Object> response =
+                    razorpayFeignClient.capturePayment(tx.getGatewayPaymentId(), body);
 
-            return PaymentGatewayResponse.builder()
-                    .gateway(Gateway.RAZORPAY)
-                    .statusCode(200)
-                    .body(json)
-                    .message("Payment captured successfully")
-                    .createdAt(Instant.now())
-                    .build();
+            String json = objectMapper.writeValueAsString(response);
 
-        } catch (Exception e) {
-            log.error("[Razorpay] Capture failed for paymentId={}", tx.getPaymentId(), e);
+            // ✅ Save success
+            PaymentGatewayResponse saved = saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    200,
+                    json,
+                    "Payment captured"
+            );
 
-            return PaymentGatewayResponse.builder()
-                    .gateway(Gateway.RAZORPAY)
-                    .statusCode(500)
-                    .body("{\"error\":\"capture_failed\"}")
-                    .message(e.getMessage())
-                    .createdAt(Instant.now())
-                    .build();
+            // ✅ Extract payment info
+            JsonNode node = objectMapper.readTree(json);
+
+
+            log.info("[Razorpay] Payment captured: paymentId={} status={}",
+                    node.get("id").asText(),
+                    node.get("status").asText());
+
+            return saved;
+
+        } catch (Exception ex) {
+
+            log.error("[Razorpay] Capture FAILED paymentId={}", tx.getGatewayPaymentId(), ex);
+
+            return saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    500,
+                    extractErrorBody(ex),
+                    "Capture failed"
+            );
         }
     }
 
-
     @Override
     public PaymentGatewayResponse initiateRefund(PaymentTransaction tx, Refund refund) {
-        log.info("[Razorpay] Initiating refund for transaction={} amount={}", tx.getExternalId(), refund.getAmount());
-        String fakeRefundId = "refund_" + UUID.randomUUID();
 
-        return PaymentGatewayResponse.builder()
-                .gateway(Gateway.RAZORPAY)
-                .statusCode(200)
-                .body("{\"refund_id\":\"" + fakeRefundId + "\",\"status\":\"success\"}")
-                .message("Refund successful")
-                .createdAt(Instant.now())
-                .build();
+        log.info("[Razorpay] Refund initiated paymentId={} amount={}",
+                tx.getGatewayPaymentId(), refund.getAmount());
+
+        try {
+            String fakeRefundId = "refund_" + UUID.randomUUID();
+
+            String json = String.format(
+                    "{\"refund_id\":\"%s\",\"status\":\"processed\"}",
+                    fakeRefundId
+            );
+
+            return saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    200,
+                    json,
+                    "Refund processed"
+            );
+
+        } catch (Exception ex) {
+
+            log.error("[Razorpay] Refund FAILED", ex);
+
+            return saveGatewayResponse(
+                    Gateway.RAZORPAY,
+                    500,
+                    extractErrorBody(ex),
+                    "Refund failed"
+            );
+        }
     }
 
     @Override
-    public String extractTransactionId(PaymentGatewayResponse response) {
+    public String extractGatewayOrderId(PaymentGatewayResponse response) {
         try {
-            JsonNode json = new ObjectMapper().readTree(response.getBody());
-            return json.get("id").asText();
+            JsonNode json = objectMapper.readTree(response.getBody());
+            return json.has("id") ? json.get("id").asText() : null;
         } catch (Exception e) {
+            log.error("Failed to extract orderId", e);
             return null;
         }
     }
 
-}
+    // ================== HELPERS ==================
 
+    private PaymentGatewayResponse saveGatewayResponse(Gateway gateway,
+                                                       int statusCode,
+                                                       String body,
+                                                       String message) {
+
+        PaymentGatewayResponse response = PaymentGatewayResponse.builder()
+                .gateway(gateway)
+                .statusCode(statusCode)
+                .body(body)
+                .message(message)
+                .createdAt(Instant.now())
+                .build();
+
+        return gatewayResponseRepository.save(response);
+    }
+
+    private String extractErrorBody(Exception ex) {
+        try {
+            return objectMapper.writeValueAsString(
+                    Map.of("error", ex.getMessage())
+            );
+        } catch (Exception e) {
+            return "{\"error\":\"unknown\"}";
+        }
+    }
+
+    private String generateReceipt(PaymentTransaction tx) {
+        return "ord_" + tx.getTransactionId()
+                .toString()
+                .replace("-", "")
+                .substring(0, 20); // <= 40 chars safe
+    }
+}

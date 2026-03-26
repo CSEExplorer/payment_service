@@ -29,6 +29,6 @@ public interface GatewayAdapter {
     /**
      * Extracts a gateway-specific transaction id from response.
      */
-    String extractTransactionId(PaymentGatewayResponse response);
+    String extractGatewayOrderId(PaymentGatewayResponse response);
 }
 

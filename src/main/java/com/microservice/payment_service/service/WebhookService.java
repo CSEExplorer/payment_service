@@ -3,27 +3,32 @@ package com.microservice.payment_service.service;
 
 import com.microservice.payment_service.dto.PaymentResponseDto;
 import com.microservice.payment_service.dto.callback.RazorpayWebhookDto;
+import com.microservice.payment_service.entity.Payment;
 import com.microservice.payment_service.entity.PaymentStatus;
 import com.microservice.payment_service.entity.PaymentTransaction;
+import com.microservice.payment_service.repository.PaymentRepository;
 import com.microservice.payment_service.repository.PaymentTransactionRepository;
 import com.microservice.payment_service.utility.RazorpayWebhookParser;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.UUID;
+
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class WebhookService {
 
-    private  final PaymentService paymentService;
+    private final PaymentService paymentService;
     private final PaymentTransactionRepository txRepo;
+    private final PaymentRepository paymentRepository;
     private final RazorpayWebhookParser parser;
 
     public void handleGatewayWebhook(String gateway, RazorpayWebhookDto callback) {
 
-        if (!gateway.equalsIgnoreCase("razorpay")) {
-            log.warn("Unsupported gateway");
+        if (!"razorpay".equalsIgnoreCase(gateway)) {
+            log.warn("Unsupported gateway: {}", gateway);
             return;
         }
 
@@ -44,43 +49,100 @@ public class WebhookService {
                 break;
 
             default:
-                log.warn("Unknown event received: {}", event);
+                log.warn("Unknown webhook event: {}", event);
         }
     }
 
-    private void handlePaymentFailed(RazorpayWebhookDto callback) {
-    }
+    /**
+     * PAYMENT AUTHORIZED → store paymentId → trigger capture
+     */
+    private void handlePaymentAuthorized(RazorpayWebhookDto dto) {
 
-    private void handlePaymentCaptured(RazorpayWebhookDto callback) {
-    }
+        String gatewayPaymentId = parser.getPaymentId(dto);
+        String gatewayOrderId = parser.getOrderId(dto);
 
-    private void  handlePaymentAuthorized(RazorpayWebhookDto dto) {
+        log.info("[Webhook] AUTHORIZED paymentId={} orderId={}",
+                gatewayPaymentId, gatewayOrderId);
 
-        String paymentId = parser.getPaymentId(dto);
-        System.out.println("reached handlePaymentAuthorized");
-        System.out.println("This is the paymentId" + paymentId);
+        // 🔥 STEP 1: Find Payment via gatewayOrderId
+        Payment payment = paymentRepository.findByGatewayOrderId(gatewayOrderId)
+                .orElseThrow(() -> new RuntimeException("Payment not found"));
 
-        String orderId   = parser.getOrderId(dto);
-        System.out.println("this is orderId"+orderId);
-        Long amount      = parser.getAmount(dto);
-
-        log.info("[Webhook] Payment authorized. paymentId={} orderId={} amount={}",
-                paymentId, orderId, amount);
-
-        // 1. Lookup PaymentTransaction using orderId
-        PaymentTransaction tx = txRepo.findByExternalId(orderId)
+        // 🔥 STEP 2: Find latest transaction
+        PaymentTransaction tx = txRepo
+                .findTopByPaymentIdOrderByAttemptNumberDesc(payment.getPaymentId())
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
-        tx.setPaymentId(paymentId);
-        tx.setExternalId(orderId);
+
+        // 🔥 Idempotency check
+        if (tx.getStatus() == PaymentStatus.AUTHORIZED ||
+                tx.getStatus() == PaymentStatus.CAPTURED) {
+            log.info("Already processed AUTHORIZED webhook");
+            return;
+        }
+
+        // 🔥 STEP 3: Update transaction in the payment service
+        tx.setGatewayPaymentId(gatewayPaymentId);
         tx.setStatus(PaymentStatus.AUTHORIZED);
         txRepo.save(tx);
-        // 2. Trigger manual capture
-        PaymentResponseDto paymentResponseDto = paymentService.capturePayment(orderId);
-        log.info("[Webhook] Capture API triggered for paymentId={}", paymentId);
 
+        // 🔥 STEP 4: Trigger capture
+        paymentService.capturePayment(tx);
+
+        log.info("[Webhook] Capture triggered for paymentId={}", gatewayPaymentId);
     }
 
+    /**
+     * PAYMENT CAPTURED → final success
+     */
+    private void handlePaymentCaptured(RazorpayWebhookDto dto) {
+        //Extra Written code
 
+        String gatewayPaymentId = parser.getPaymentId(dto);
+
+        log.info("[Webhook] CAPTURED paymentId={}", gatewayPaymentId);
+
+        PaymentTransaction tx = txRepo.findByGatewayPaymentId(gatewayPaymentId)
+                .orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        if (tx.getStatus() == PaymentStatus.CAPTURED) {
+            log.info("Already captured");
+            return;
+        }
+
+        tx.setStatus(PaymentStatus.CAPTURED);
+        txRepo.save(tx);
+
+        Payment payment = paymentRepository.findByPaymentId(tx.getPaymentId())
+                .orElseThrow();
+
+        payment.setStatus(PaymentStatus.CAPTURED);
+        paymentRepository.save(payment);
+    }
+
+    /**
+     * PAYMENT FAILED
+     */
+    private void handlePaymentFailed(RazorpayWebhookDto dto) {
+
+        String gatewayPaymentId = parser.getPaymentId(dto);
+
+        log.info("[Webhook] FAILED paymentId={}", gatewayPaymentId);
+
+        PaymentTransaction tx = txRepo.findByGatewayPaymentId(gatewayPaymentId)
+                .orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        if (tx.getStatus() == PaymentStatus.FAILED) {
+            log.info("Already failed");
+            return;
+        }
+
+        tx.setStatus(PaymentStatus.FAILED);
+        txRepo.save(tx);
+
+        Payment payment = paymentRepository.findByPaymentId(tx.getPaymentId())
+                .orElseThrow();
+
+        payment.setStatus(PaymentStatus.FAILED);
+        paymentRepository.save(payment);
+    }
 }
-
-

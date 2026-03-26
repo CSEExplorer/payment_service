@@ -1,10 +1,10 @@
 package com.microservice.payment_service.dto;
 
-
 import com.microservice.payment_service.entity.Gateway;
 import lombok.*;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 @Data
 @NoArgsConstructor
@@ -12,32 +12,10 @@ import java.math.BigDecimal;
 @Builder
 public class PaymentRequestDto {
 
-    /**
-     * User initiating the payment.
-     */
-    private String userId;
-
-    /**
-     * The total payment amount.
-     */
+    private UUID userId;         // 🔥 FIXED
     private BigDecimal amount;
-
-    /**
-     * Currency code (e.g. "INR", "USD").
-     */
     private String currency;
-
-    /**
-     * Gateway to be used (Razorpay, Stripe, PayPal, etc.)
-     */
     private Gateway gateway;
 
-
-    /**
-     * Optional business reference (e.g. orderId, invoiceId).
-     */
-    private String referenceId;
-
-
+    private UUID referenceId;    // 🔥 orderId (clean now)
 }
-

@@ -1,5 +1,6 @@
 package com.microservice.payment_service.entity;
 
+
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -18,35 +19,35 @@ public class PaymentGatewayResponse {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "gateway", nullable = false)
     @Enumerated(EnumType.STRING)
+    @Column(name = "gateway", nullable = false)
     private Gateway gateway;
 
     /**
-     * HTTP status code or gateway specific status code.
+     * HTTP status code or gateway-specific status code.
      */
     @Column(name = "status_code")
     private Integer statusCode;
 
     /**
-     * Raw response body from gateway. Could be JSON text; keep it large.
+     * Raw JSON response from gateway.
      */
-
     @Column(name = "body", columnDefinition = "TEXT")
     private String body;
 
     /**
-     * Optional short message / summary extracted from response.
+     * Short readable message (optional).
      */
     @Column(name = "message")
     private String message;
 
-    @Column(name = "created_at", nullable = false)
+    @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
     @PrePersist
     public void prePersist() {
-        if (createdAt == null) createdAt = Instant.now();
+        if (createdAt == null) {
+            createdAt = Instant.now();
+        }
     }
 }
-

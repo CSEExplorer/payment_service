@@ -12,8 +12,8 @@ import java.util.UUID;
 @Entity
 @Table(name = "payment_transactions",
         indexes = {
-                @Index(name = "idx_payment_external_id", columnList = "external_id"),
-                @Index(name = "idx_payment_status", columnList = "status")
+                @Index(name = "idx_txn_payment_id", columnList = "payment_id"),
+                @Index(name = "idx_txn_status", columnList = "status")
         })
 @Getter
 @Setter
@@ -27,27 +27,35 @@ public class PaymentTransaction {
     private Long id;
 
     /**
-     * ID returned by gateway (if any). Nullable until gateway responds.
+     * Internal transaction ID (UUID)
      */
-    @Column(name = "external_id", unique = true)
-    private String externalId;
+    @Column(name = "transaction_id", nullable = false, unique = true, updatable = false)
+    private UUID transactionId;
 
     /**
-     * Reference to the user or merchant who initiated the payment.
-     * Keep as String for flexibility (UUID, numeric id, etc.)
+     * Payment aggregate ID (same across retries)
      */
+    @Column(name = "payment_id", nullable = false)
+    private UUID paymentId;
+
+    /**
+     * Order ID from Order Service
+     */
+    @Column(name = "order_id", nullable = false)
+    private UUID orderId;
+
+    /**
+     * Gateway payment ID (razorpay_payment_id)
+     */
+    @Column(name = "gateway_payment_id")
+    private String gatewayPaymentId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "gateway")
+    private Gateway gateway;
+
     @Column(name = "user_id", nullable = false)
     private String userId;
-
-    @Column(name = "payment_id", nullable = true)
-    private String paymentId;
-
-    /**
-     * Business reference or order id in your system.
-     */
-    // ye order id ka corresponding system UUID hai
-    @Column(name = "reference_id")
-    private UUID referenceId;
 
     @Column(name = "amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal amount;
@@ -59,13 +67,18 @@ public class PaymentTransaction {
     @Column(nullable = false)
     private PaymentStatus status;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "gateway")
-    private Gateway gateway;
+    /**
+     * Retry attempt number
+     */
+    @Column(name = "attempt_number")
+    private Integer attemptNumber;
 
     /**
-     * Amount already refunded (aggregate).
+     * Failure reason if any
      */
+    @Column(name = "failure_reason")
+    private String failureReason;
+
     @Column(name = "refunded_amount", precision = 19, scale = 4)
     private BigDecimal refundedAmount;
 
@@ -73,9 +86,7 @@ public class PaymentTransaction {
     @JoinColumn(name = "plan_id")
     private Plan plan;
 
-    @OneToMany(mappedBy = "paymentTransaction", cascade = CascadeType.ALL, orphanRemoval = true)
-    @Builder.Default
-    private List<PaymentOperation> operations = new ArrayList<>();
+
 
     @OneToMany(mappedBy = "paymentTransaction", cascade = CascadeType.ALL, orphanRemoval = true)
     @Builder.Default
@@ -91,27 +102,37 @@ public class PaymentTransaction {
     private Instant capturedAt;
 
     @PrePersist
-    public void onCreate() {
-        if (createdAt == null) createdAt = Instant.now();
+    public void prePersist() {
+        if (transactionId == null) {
+            transactionId = UUID.randomUUID();
+        }
+        if (createdAt == null) {
+            createdAt = Instant.now();
+        }
         updatedAt = createdAt;
-        if (refundedAmount == null) refundedAmount = BigDecimal.ZERO;
-        if (status == null) status = PaymentStatus.CREATED;
+
+        if (refundedAmount == null) {
+            refundedAmount = BigDecimal.ZERO;
+        }
+
+        if (status == null) {
+            status = PaymentStatus.CREATED;
+        }
+
+        if (attemptNumber == null) {
+            attemptNumber = 1;
+        }
     }
 
     @PreUpdate
-    public void onUpdate() {
+    public void preUpdate() {
         updatedAt = Instant.now();
     }
 
-    // helper
-    public void addOperation(PaymentOperation op) {
-        operations.add(op);
-        op.setPaymentTransaction(this);
-    }
 
-    public void addRefund(Refund r) {
-        refunds.add(r);
-        r.setPaymentTransaction(this);
+
+    public void addRefund(Refund refund) {
+        refunds.add(refund);
+        refund.setPaymentTransaction(this);
     }
 }
-

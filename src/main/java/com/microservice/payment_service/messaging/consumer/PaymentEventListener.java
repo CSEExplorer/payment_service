@@ -22,13 +22,11 @@ public class PaymentEventListener {
 
         OrderCreatedEvent payload = event.getPayload();
         PaymentRequestDto request = PaymentRequestDto.builder()
-                .userId(payload.getUserId().toString())
+                .userId(payload.getUserId())
                 .amount(payload.getTotalAmount())
                 .currency("INR")
                 .gateway(Gateway.RAZORPAY)
-                .referenceId(payload.getOrderId().toString()).build();
-
-
+                .referenceId(payload.getOrderId()).build();
 
         paymentService.createPayment(request);
     }
