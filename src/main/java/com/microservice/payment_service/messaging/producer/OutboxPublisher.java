@@ -2,8 +2,12 @@ package com.microservice.payment_service.messaging.producer;
 
 
 
+import com.aditya.contracts.payment.PaymentCompletedEvent;
+import com.aditya.contracts.payment.PaymentFailedEvent;
+import com.aditya.contracts.payment.PaymentInitiatedEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.payment_service.config.RabbitMQConfig;
-import com.microservice.payment_service.messaging.util.EventRoutingKeyResolver;
+
 import com.microservice.payment_service.outbox.model.OutboxEvent;
 import com.microservice.payment_service.outbox.model.OutboxStatus;
 import com.microservice.payment_service.outbox.repository.OutboxEventRepository;
@@ -15,7 +19,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.List;
-
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -23,19 +26,22 @@ public class OutboxPublisher {
 
     private final OutboxEventRepository repository;
     private final RabbitTemplate rabbitTemplate;
-    private final EventRoutingKeyResolver routingKeyResolver;
-    @Scheduled(fixedDelay = 2000)
+    private final ObjectMapper objectMapper; // ✅ REQUIRED
+
+    @Scheduled(fixedDelay = 10000)
     public void publishEvents() {
 
         List<OutboxEvent> events = repository.findProcessableEvents();
 
         for (OutboxEvent event : events) {
             try {
-                String routingKey = routingKeyResolver.resolve(event.getEventType());
+
+                Object payload = mapPayload(event); // 🔥 KEY FIX
+
                 rabbitTemplate.convertAndSend(
                         RabbitMQConfig.EXCHANGE,
-                        routingKey,
-                        event.getPayload()
+                        event.getEventType(),
+                        payload   // ✅ OBJECT, not String
                 );
 
                 event.setStatus(OutboxStatus.SENT);
@@ -60,6 +66,24 @@ public class OutboxPublisher {
 
             repository.save(event);
         }
+    }
+
+    // 🔥 CENTRAL FIX METHOD
+    private Object mapPayload(OutboxEvent event) throws Exception {
+
+        return switch (event.getEventType()) {
+
+            case "payment.initiated" ->
+                    objectMapper.readValue(event.getPayload(), PaymentInitiatedEvent.class);
+
+            case "payment.completed" ->
+                    objectMapper.readValue(event.getPayload(), PaymentCompletedEvent.class);
+
+            case "payment.failed" ->
+                    objectMapper.readValue(event.getPayload(), PaymentFailedEvent.class);
+
+            default -> throw new RuntimeException("Unknown event type: " + event.getEventType());
+        };
     }
 
     private Instant calculateBackoff(int retryCount) {

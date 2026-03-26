@@ -29,7 +29,7 @@ public class OutboxService {
                           DomainEvent<?> domainEvent) {
 
         try {
-            String payloadJson = objectMapper.writeValueAsString(domainEvent);
+            String payloadJson = objectMapper.writeValueAsString(domainEvent.getPayload());
 
             OutboxEvent event = OutboxEvent.builder()
                     .aggregateId(aggregateId)

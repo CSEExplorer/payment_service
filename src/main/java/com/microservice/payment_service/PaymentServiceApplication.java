@@ -6,7 +6,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @EnableFeignClients
-//@EnableScheduling
+@EnableScheduling
 @SpringBootApplication
 
 public class PaymentServiceApplication {

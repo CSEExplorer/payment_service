@@ -3,6 +3,7 @@ package com.microservice.payment_service.messaging.consumer;
 
 import com.aditya.contracts.event.DomainEvent;
 import com.aditya.contracts.order.OrderCreatedEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microservice.payment_service.dto.PaymentRequestDto;
 import com.microservice.payment_service.entity.Gateway;
 import com.microservice.payment_service.service.PaymentService;
@@ -16,17 +17,17 @@ import org.springframework.stereotype.Component;
 public class PaymentEventListener {
 
     private final PaymentService paymentService;
-
+    private final ObjectMapper objectMapper;
     @RabbitListener(queues = "payment.queue")
-    public void handleOrderCreated(DomainEvent<OrderCreatedEvent> event) {
+    public void handleOrderCreated(OrderCreatedEvent event) {
 
-        OrderCreatedEvent payload = event.getPayload();
+
         PaymentRequestDto request = PaymentRequestDto.builder()
-                .userId(payload.getUserId())
-                .amount(payload.getTotalAmount())
+                .userId(event.getUserId())
+                  .amount(event.getTotalAmount())
                 .currency("INR")
                 .gateway(Gateway.RAZORPAY)
-                .referenceId(payload.getOrderId()).build();
+                .referenceId(event.getOrderId()).build();
 
         paymentService.createPayment(request);
     }
